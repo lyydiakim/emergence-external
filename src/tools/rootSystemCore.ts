@@ -44,9 +44,9 @@ export const DEFAULT_ROOT: RootParams = {
   downwardBias: 0.55,
   lateralReach: 60,
   taprootThickness: 1.5,
-  thickness: 0.2,
+  thickness: 0.4,
   // Gentle end shaping and moderate tendril curl.
-  taper: 0.2,
+  taper: 0.14,
   coil: 0.25,
   endThickness: 2.6,
   // Root Brush's organic mode is clean linework — no mycelial hair layer.

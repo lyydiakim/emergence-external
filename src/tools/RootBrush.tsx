@@ -59,7 +59,7 @@ export default function RootBrush() {
   const [zoom, setZoom] = useState(1);
   const { w, h, exportDims, pxScale, config, setConfig } = useCanvasDimensions(RW, RH);
   const [params, setParams] = useState<RootParams>(DEFAULT_ROOT);
-  const [brush, setBrush] = useState<Brush>("faceted");
+  const [brush, setBrush] = useState<Brush>("organic");
   const [ink, setInk] = useState(INK);
   const [background, setBackground] = useState(BG);
   const [image, setImage] = useState<HTMLImageElement | null>(null);
@@ -250,7 +250,7 @@ export default function RootBrush() {
     setGrowing(false);
     setGrowth(1);
     setParams(DEFAULT_ROOT);
-    setBrush("faceted");
+    setBrush("organic");
     setInk(INK);
     setBackground(BG);
     setImage(null);
