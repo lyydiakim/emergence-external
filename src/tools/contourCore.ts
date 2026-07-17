@@ -2,7 +2,7 @@ import { contours as d3contours } from "d3-contour";
 import { createNoise2D } from "simplex-noise";
 import { mulberry32 } from "./specimenTreeCore";
 import { sampleLuminance, toneAt, type LumBuffer } from "./flowFieldCore";
-import { makeDissolve } from "./dissolveFade";
+import { makeFade, strokeFaded, svgFadedPaths } from "./dissolveFade";
 
 // Generative canvas size — matches the other tools.
 export const CW = 680;
@@ -227,45 +227,33 @@ export function drawContours(
   ctx.strokeStyle = ink;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  const keep = fade ? makeDissolve(w, h, { seed: fadeSeed }) : null;
+  const fieldFade = fade ? makeFade(w, h, { seed: fadeSeed }) : null;
   let lineId = 0;
   for (const line of result.lines) {
     if (line.order > progress) {
       lineId++;
       continue;
     }
-    ctx.lineWidth = line.w;
-    if (!keep) {
-      ctx.beginPath();
-      ctx.moveTo(line.pts[0], line.pts[1]);
-      for (let i = 2; i < line.pts.length; i += 2) ctx.lineTo(line.pts[i], line.pts[i + 1]);
-      ctx.stroke();
-      lineId++;
-      continue;
-    }
-    // Trail-off: draw the runs of the line that survive at their depth, solid,
-    // breaking where the line has dropped out. Whole lines end at staggered
-    // depths so the field thins from dense to sparse toward the bottom.
     const id = lineId++;
-    const pts = line.pts;
-    let started = false;
-    for (let i = 0; i < pts.length; i += 2) {
-      const x = pts[i];
-      const y = pts[i + 1];
-      if (keep(id, x, y)) {
-        if (!started) {
-          ctx.beginPath();
-          ctx.moveTo(x, y);
-          started = true;
-        } else {
-          ctx.lineTo(x, y);
+    const fadeOpts = fieldFade
+      ? {
+          keep: (x: number, y: number) => fieldFade.keep(id, x, y),
+          alpha: (x: number, y: number) => fieldFade.alpha(id, x, y),
+          width: (x: number, y: number) => fieldFade.width(id, x, y),
         }
-      } else if (started) {
-        ctx.stroke();
-        started = false;
-      }
+      : null;
+    const pts = line.pts;
+    if (pts.length < 6) continue;
+    if (
+      pts[0] !== pts[pts.length - 2] ||
+      pts[1] !== pts[pts.length - 1]
+    ) {
+      const closed = pts.slice();
+      closed.push(pts[0], pts[1]);
+      strokeFaded(ctx, closed, line.w, fadeOpts);
+    } else {
+      strokeFaded(ctx, pts, line.w, fadeOpts);
     }
-    if (started) ctx.stroke();
   }
 }
 
@@ -275,18 +263,36 @@ export function buildContourSVG(
   result: ContourResult,
   ink: string,
   background: string,
+  fade = false,
+  fadeSeed = 1,
 ) {
   const f = (n: number) => Math.round(n * 100) / 100;
+  const fieldFade = fade ? makeFade(w, h, { seed: fadeSeed }) : null;
   const parts: string[] = [
     `<rect width="${w}" height="${h}" fill="${background}"/>`,
     `<g fill="none" stroke="${ink}" stroke-linecap="round" stroke-linejoin="round">`,
   ];
+  let lineId = 0;
   for (const line of result.lines) {
-    let d = "";
-    for (let i = 0; i < line.pts.length; i += 2) {
-      d += `${i === 0 ? "M" : "L"}${f(line.pts[i])} ${f(line.pts[i + 1])}`;
+    const id = lineId++;
+    const fadeOpts = fieldFade
+      ? {
+          keep: (x: number, y: number) => fieldFade.keep(id, x, y),
+          alpha: (x: number, y: number) => fieldFade.alpha(id, x, y),
+          width: (x: number, y: number) => fieldFade.width(id, x, y),
+        }
+      : null;
+    const pts = line.pts;
+    if (pts.length >= 6) {
+      const closed = pts.slice();
+      if (
+        closed[0] !== closed[closed.length - 2] ||
+        closed[1] !== closed[closed.length - 1]
+      ) {
+        closed.push(closed[0], closed[1]);
+      }
+      parts.push(svgFadedPaths(closed, line.w, fadeOpts, f));
     }
-    parts.push(`<path d="${d}Z" stroke-width="${f(line.w)}"/>`);
   }
   parts.push(`</g>`);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${parts.join("")}</svg>`;

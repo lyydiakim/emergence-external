@@ -182,6 +182,8 @@ export default function Contour({ controlsTarget = null }: ContourProps = {}) {
       exportResult,
       safeColor(ink, INK),
       "transparent",
+      fade,
+      params.seed,
     );
     download(new Blob([svg], { type: "image/svg+xml" }), "svg");
   };
@@ -244,7 +246,7 @@ export default function Contour({ controlsTarget = null }: ContourProps = {}) {
       onConfigChange={setConfig}
       fade={fade}
       onFadeChange={setFade}
-      fadeTip="Dissolve the linework toward the bottom"
+      fadeTip="End vectors short of the bottom with tapered tips"
       sliders={SLIDER_KEYS_SIMPLE.map(renderRow)}
       ink={ink}
       background={background}

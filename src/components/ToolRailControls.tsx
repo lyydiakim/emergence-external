@@ -56,7 +56,7 @@ export default function ToolRailControls({
   onConfigChange,
   fade,
   onFadeChange,
-  fadeTip = "Thin the linework from dense to sparse toward the bottom",
+  fadeTip = "End vectors short of the bottom with tapered tips",
   sliders,
   ink,
   background,

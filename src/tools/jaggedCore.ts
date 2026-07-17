@@ -1,5 +1,5 @@
 import { mulberry32 } from "./specimenTreeCore";
-import { makeDissolve } from "./dissolveFade";
+import { makeFade, strokeFaded, svgFadedPaths } from "./dissolveFade";
 import {
   BG,
   DEFAULT_FLOW,
@@ -28,7 +28,7 @@ export interface JaggedParams extends FlowParams {
 
 export const DEFAULT_JAGGED: JaggedParams = {
   ...DEFAULT_FLOW,
-  seed: 42061,
+  seed: 48218,
   fieldScale: 4,
   swirl: 0,
   turbulence: 2,
@@ -341,10 +341,10 @@ export function drawJagged(
   }
 
   ctx.strokeStyle = ink;
-  ctx.lineCap = "butt";
-  ctx.lineJoin = "miter";
+  ctx.lineCap = fade ? "round" : "butt";
+  ctx.lineJoin = fade ? "round" : "miter";
 
-  const dissolve = fade ? makeDissolve(w, h, { seed: fadeSeed }) : null;
+  const fieldFade = fade ? makeFade(w, h, { seed: fadeSeed }) : null;
 
   const SPREAD = 0.65;
   const denom = 1 - SPREAD;
@@ -352,6 +352,13 @@ export function drawJagged(
   let lineId = 0;
   for (const line of lines) {
     const id = lineId++;
+    const fadeOpts = fieldFade
+      ? {
+          keep: (x: number, y: number) => fieldFade.keep(id, x, y),
+          alpha: (x: number, y: number) => fieldFade.alpha(id, x, y),
+          width: (x: number, y: number) => fieldFade.width(id, x, y),
+        }
+      : null;
     const local =
       progress >= 1
         ? 1
@@ -370,32 +377,17 @@ export function drawJagged(
     const full = Math.floor(grown);
     const frac = grown - full;
 
-    ctx.lineWidth = line.w;
-
-    for (let i = 0; i < full && i < segs; i++) {
-      // Thin the ridge: drop segments whose midpoint has dissolved.
-      if (
-        dissolve &&
-        !dissolve(id, (pts[i * 2] + pts[(i + 1) * 2]) / 2, (pts[i * 2 + 1] + pts[(i + 1) * 2 + 1]) / 2)
-      )
-        continue;
-      ctx.beginPath();
-      ctx.moveTo(pts[i * 2], pts[i * 2 + 1]);
-      ctx.lineTo(pts[(i + 1) * 2], pts[(i + 1) * 2 + 1]);
-      ctx.stroke();
-    }
+    const draw: number[] = [pts[0], pts[1]];
+    const last = Math.min(full, segs);
+    for (let i = 1; i <= last; i++) draw.push(pts[i * 2], pts[i * 2 + 1]);
     if (frac > 0 && full < segs) {
       const ax = pts[full * 2];
       const ay = pts[full * 2 + 1];
       const bx = pts[(full + 1) * 2];
       const by = pts[(full + 1) * 2 + 1];
-      if (!dissolve || dissolve(id, (ax + bx) / 2, (ay + by) / 2)) {
-        ctx.beginPath();
-        ctx.moveTo(ax, ay);
-        ctx.lineTo(ax + (bx - ax) * frac, ay + (by - ay) * frac);
-        ctx.stroke();
-      }
+      draw.push(ax + (bx - ax) * frac, ay + (by - ay) * frac);
     }
+    strokeFaded(ctx, draw, line.w, fadeOpts);
   }
 }
 
@@ -410,31 +402,22 @@ export function buildJaggedSVG(
   fadeSeed = 1,
 ) {
   const f = (n: number) => Math.round(n * 100) / 100;
-  const dissolve = fade ? makeDissolve(w, h, { seed: fadeSeed }) : null;
+  const fieldFade = fade ? makeFade(w, h, { seed: fadeSeed }) : null;
   const parts: string[] = [
     `<rect width="${w}" height="${h}" fill="${background}"/>`,
-    `<g fill="none" stroke="${ink}" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="6">`,
+    `<g fill="none" stroke="${ink}" stroke-linecap="${fade ? "round" : "butt"}" stroke-linejoin="${fade ? "round" : "miter"}" stroke-miterlimit="6">`,
   ];
   let lineId = 0;
   for (const line of lines) {
     const id = lineId++;
-    const pts = line.pts;
-    const segs = pts.length / 2 - 1;
-    if (segs < 1) continue;
-    for (let i = 0; i < segs; i++) {
-      if (
-        dissolve &&
-        !dissolve(id, (pts[i * 2] + pts[(i + 1) * 2]) / 2, (pts[i * 2 + 1] + pts[(i + 1) * 2 + 1]) / 2)
-      )
-        continue;
-      const x1 = f(pts[i * 2]);
-      const y1 = f(pts[i * 2 + 1]);
-      const x2 = f(pts[(i + 1) * 2]);
-      const y2 = f(pts[(i + 1) * 2 + 1]);
-      parts.push(
-        `<path d="M${x1} ${y1}L${x2} ${y2}" stroke-width="${f(line.w)}"/>`,
-      );
-    }
+    const fadeOpts = fieldFade
+      ? {
+          keep: (x: number, y: number) => fieldFade.keep(id, x, y),
+          alpha: (x: number, y: number) => fieldFade.alpha(id, x, y),
+          width: (x: number, y: number) => fieldFade.width(id, x, y),
+        }
+      : null;
+    parts.push(svgFadedPaths(line.pts, line.w, fadeOpts, f));
   }
   parts.push(`</g>`);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${parts.join("")}</svg>`;

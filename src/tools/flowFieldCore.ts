@@ -1,5 +1,5 @@
 import { mulberry32 } from "./specimenTreeCore";
-import { makeDissolve, strokeRuns, svgRuns } from "./dissolveFade";
+import { makeFade, strokeFaded, svgFadedPaths } from "./dissolveFade";
 
 // Generative canvas size — matches the 2D tree tool so cards feel consistent.
 export const FW = 680;
@@ -44,7 +44,7 @@ export interface FlowParams {
 }
 
 export const DEFAULT_FLOW: FlowParams = {
-  seed: 70725,
+  seed: 60132,
   fieldScale: 4,
   swirl: 1,
   turbulence: 2,
@@ -822,7 +822,7 @@ export function drawFlow(
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
 
-  const dissolve = fade ? makeDissolve(w, h, { seed: fadeSeed }) : null;
+  const fieldFade = fade ? makeFade(w, h, { seed: fadeSeed }) : null;
 
   // Fraction of the timeline spent staggering when lines *start* growing, so
   // the field reads as branches extending across the canvas rather than whole
@@ -833,7 +833,13 @@ export function drawFlow(
   let lineId = 0;
   for (const line of lines) {
     const id = lineId++;
-    const keep = dissolve ? (x: number, y: number) => dissolve(id, x, y) : null;
+    const fadeOpts = fieldFade
+      ? {
+          keep: (x: number, y: number) => fieldFade.keep(id, x, y),
+          alpha: (x: number, y: number) => fieldFade.alpha(id, x, y),
+          width: (x: number, y: number) => fieldFade.width(id, x, y),
+        }
+      : null;
     // Local 0..1 progress for this line: starts at line.order * SPREAD, then
     // extends point-by-point until fully drawn.
     const local =
@@ -854,9 +860,7 @@ export function drawFlow(
     const full = Math.floor(grown);
     const frac = grown - full;
 
-    ctx.lineWidth = line.w;
-    // Collect the points grown so far, then stroke the runs that survive the
-    // dissolve (whole line when not fading).
+    // Collect the points grown so far, then stroke with dropout + soft fade.
     const draw: number[] = [pts[0], pts[1]];
     const last = Math.min(full, segs);
     for (let i = 1; i <= last; i++) draw.push(pts[i * 2], pts[i * 2 + 1]);
@@ -867,20 +871,27 @@ export function drawFlow(
       const by = pts[(full + 1) * 2 + 1];
       draw.push(ax + (bx - ax) * frac, ay + (by - ay) * frac);
     }
-    strokeRuns(ctx, draw, keep);
+    strokeFaded(ctx, draw, line.w, fadeOpts);
 
-    // Only cap the arrowhead once the line has fully grown — and only if its
-    // tip survives the dissolve.
-    if (line.arrow && t >= 1 && (!keep || keep(pts[pts.length - 2], pts[pts.length - 1]))) {
-      const head = arrowHead(pts, p.arrowSize);
-      if (head) {
-        const ex = pts[pts.length - 2];
-        const ey = pts[pts.length - 1];
-        ctx.beginPath();
-        ctx.moveTo(head[0], head[1]);
-        ctx.lineTo(ex, ey);
-        ctx.lineTo(head[2], head[3]);
-        ctx.stroke();
+    // Cap the arrowhead once the line has fully grown — only if the tip remains.
+    if (line.arrow && t >= 1) {
+      const ex = pts[pts.length - 2];
+      const ey = pts[pts.length - 1];
+      if (!fieldFade || fieldFade.keep(id, ex, ey)) {
+        const tipW = fieldFade ? fieldFade.width(id, ex, ey) : 1;
+        const tipA = fieldFade ? fieldFade.alpha(id, ex, ey) : 1;
+        const head = arrowHead(pts, p.arrowSize * tipW);
+        if (head) {
+          const prev = ctx.globalAlpha;
+          ctx.globalAlpha = prev * tipA;
+          ctx.lineWidth = line.w * tipW;
+          ctx.beginPath();
+          ctx.moveTo(head[0], head[1]);
+          ctx.lineTo(ex, ey);
+          ctx.lineTo(head[2], head[3]);
+          ctx.stroke();
+          ctx.globalAlpha = prev;
+        }
       }
     }
   }
@@ -897,7 +908,7 @@ export function buildFlowSVG(
   fadeSeed = 1,
 ) {
   const f = (n: number) => Math.round(n * 100) / 100;
-  const dissolve = fade ? makeDissolve(w, h, { seed: fadeSeed }) : null;
+  const fieldFade = fade ? makeFade(w, h, { seed: fadeSeed }) : null;
   const parts: string[] = [
     `<rect width="${w}" height="${h}" fill="${background}"/>`,
     `<g fill="none" stroke="${ink}" stroke-linecap="round" stroke-linejoin="round">`,
@@ -905,17 +916,31 @@ export function buildFlowSVG(
   let lineId = 0;
   for (const line of lines) {
     const id = lineId++;
-    const keep = dissolve ? (x: number, y: number) => dissolve(id, x, y) : null;
-    let d = svgRuns(line.pts, keep, f);
-    if (line.arrow && (!keep || keep(line.pts[line.pts.length - 2], line.pts[line.pts.length - 1]))) {
-      const head = arrowHead(line.pts, p.arrowSize);
-      if (head) {
-        const ex = line.pts[line.pts.length - 2];
-        const ey = line.pts[line.pts.length - 1];
-        d += `M${f(head[0])} ${f(head[1])}L${f(ex)} ${f(ey)}L${f(head[2])} ${f(head[3])}`;
+    const fadeOpts = fieldFade
+      ? {
+          keep: (x: number, y: number) => fieldFade.keep(id, x, y),
+          alpha: (x: number, y: number) => fieldFade.alpha(id, x, y),
+          width: (x: number, y: number) => fieldFade.width(id, x, y),
+        }
+      : null;
+    parts.push(svgFadedPaths(line.pts, line.w, fadeOpts, f));
+    if (line.arrow) {
+      const ex = line.pts[line.pts.length - 2];
+      const ey = line.pts[line.pts.length - 1];
+      if (!fieldFade || fieldFade.keep(id, ex, ey)) {
+        const tipW = fieldFade ? fieldFade.width(id, ex, ey) : 1;
+        const tipA = fieldFade ? fieldFade.alpha(id, ex, ey) : 1;
+        const head = arrowHead(line.pts, p.arrowSize * tipW);
+        if (head) {
+          const d = `M${f(head[0])} ${f(head[1])}L${f(ex)} ${f(ey)}L${f(head[2])} ${f(head[3])}`;
+          const op =
+            tipA >= 0.995 ? "" : ` opacity="${Math.round(tipA * 100) / 100}"`;
+          parts.push(
+            `<path d="${d}" stroke-width="${f(line.w * tipW)}"${op}/>`,
+          );
+        }
       }
     }
-    if (d) parts.push(`<path d="${d}" stroke-width="${f(line.w)}"/>`);
   }
   parts.push(`</g>`);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${parts.join("")}</svg>`;

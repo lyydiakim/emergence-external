@@ -8,7 +8,7 @@ import { useCanvasRecorder, useStopRecordWhenAnimatingEnds } from "../hooks/useC
 import { EXPORT_WIDTH, setCanvasAspectVars } from "./aspectRatio";
 import { renderPngBlob } from "./exportCanvas";
 import { safeColor } from "./specimenTreeCore";
-import { makeDissolve, strokeRuns, svgRuns } from "./dissolveFade";
+import { makeFade, strokeFaded, svgFadedPaths } from "./dissolveFade";
 import {
   REVEAL_ORDER,
   buildShapeMask,
@@ -139,16 +139,20 @@ export default function RoadColors({
       proj: (p: { lat: number; lon: number }) => { x: number; y: number },
       w: RoadWay,
       strokeScale = 1,
-      keep: ((x: number, y: number) => boolean) | null = null,
+      fadeOpts: {
+        keep?: ((x: number, y: number) => boolean) | null;
+        alpha?: ((x: number, y: number) => number) | null;
+        width?: ((x: number, y: number) => number) | null;
+      } | null = null,
     ) => {
       ctx.strokeStyle = colorFor();
-      ctx.lineWidth = strokeFor(w.designation, strokeScale);
+      const base = strokeFor(w.designation, strokeScale);
       const pts: number[] = [];
       for (const p of w.pts) {
         const q = proj(p);
         pts.push(q.x, q.y);
       }
-      strokeRuns(ctx, pts, keep);
+      strokeFaded(ctx, pts, base, fadeOpts);
     },
     [colorFor, strokeFor],
   );
@@ -229,9 +233,17 @@ export default function RoadColors({
       const proj = makeProjector(d.center, d.radius, mapSize, view);
       const ordered = orderWays(d, keepWay);
       const n = Math.min(roadCount, ordered.length);
-      const dissolve = fade ? makeDissolve(mapSize, mapSize, { seed: 7 }) : null;
-      const keepFor = (w: RoadWay) =>
-        dissolve ? (x: number, y: number) => dissolve(wayKey(w), x, y) : null;
+      const fieldFade = fade ? makeFade(mapSize, mapSize, { seed: 7 }) : null;
+      const fadeFor = (w: RoadWay) =>
+        fieldFade
+          ? {
+              keep: (x: number, y: number) => fieldFade.keep(wayKey(w), x, y),
+              alpha: (x: number, y: number) =>
+                fieldFade.alpha(wayKey(w), x, y),
+              width: (x: number, y: number) =>
+                fieldFade.width(wayKey(w), x, y),
+            }
+          : null;
       if (shapeMask) {
         const layer = document.createElement("canvas");
         layer.width = mapSize * dpr;
@@ -239,10 +251,10 @@ export default function RoadColors({
         const lctx = layer.getContext("2d")!;
         lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         lctx.clearRect(0, 0, mapSize, mapSize);
-        for (let ri = 0; ri < n; ri++) drawWay(lctx, proj, ordered[ri], strokeScale, keepFor(ordered[ri]));
+        for (let ri = 0; ri < n; ri++) drawWay(lctx, proj, ordered[ri], strokeScale, fadeFor(ordered[ri]));
         compositeRoads(ctx, layer, dpr, shapeMask, mapSize);
       } else {
-        for (let ri = 0; ri < n; ri++) drawWay(ctx, proj, ordered[ri], strokeScale, keepFor(ordered[ri]));
+        for (let ri = 0; ri < n; ri++) drawWay(ctx, proj, ordered[ri], strokeScale, fadeFor(ordered[ri]));
       }
     },
     [bg, prepare, drawWay, view, keepWay, shapeMask, compositeRoads, fade],
@@ -275,20 +287,28 @@ export default function RoadColors({
         : { lctx: ctx, layer: null as HTMLCanvasElement | null };
       if (useMask) roadsCtx.clearRect(0, 0, SIZE, SIZE);
 
-      const dissolve = fade ? makeDissolve(SIZE, SIZE, { seed: 7 }) : null;
+      const fieldFade = fade ? makeFade(SIZE, SIZE, { seed: 7 }) : null;
       const frames = Math.max(1, Math.round(FILL_IN_SEC * 60));
       const perFrame = Math.max(1, Math.ceil(ordered.length / frames));
       let i = 0;
       const step = () => {
         const end = Math.min(ordered.length, i + perFrame);
-        for (; i < end; i++)
+        for (; i < end; i++) {
+          const way = ordered[i];
           drawWay(
             roadsCtx,
             proj,
-            ordered[i],
+            way,
             1,
-            dissolve ? (x, y) => dissolve(wayKey(ordered[i]), x, y) : null,
+            fieldFade
+              ? {
+                  keep: (x, y) => fieldFade.keep(wayKey(way), x, y),
+                  alpha: (x, y) => fieldFade.alpha(wayKey(way), x, y),
+                  width: (x, y) => fieldFade.width(wayKey(way), x, y),
+                }
+              : null,
           );
+        }
         roadsDrawnRef.current = i;
         if (useMask && shapeMask && roadsLayer) {
           prepare(ctx, dpr, background);
@@ -333,16 +353,24 @@ export default function RoadColors({
       if (!ctx) return;
       prepare(ctx, dpr, safeColor(bg, BG));
       const proj = makeProjector(d.center, d.radius, SIZE, view);
-      const dissolve = fade ? makeDissolve(SIZE, SIZE, { seed: 7 }) : null;
-      const keepFor = (w: RoadWay) =>
-        dissolve ? (x: number, y: number) => dissolve(wayKey(w), x, y) : null;
+      const fieldFade = fade ? makeFade(SIZE, SIZE, { seed: 7 }) : null;
+      const fadeFor = (w: RoadWay) =>
+        fieldFade
+          ? {
+              keep: (x: number, y: number) => fieldFade.keep(wayKey(w), x, y),
+              alpha: (x: number, y: number) =>
+                fieldFade.alpha(wayKey(w), x, y),
+              width: (x: number, y: number) =>
+                fieldFade.width(wayKey(w), x, y),
+            }
+          : null;
       if (shapeMask) {
         const { lctx, layer } = getRoadsLayer(dpr);
         lctx.clearRect(0, 0, SIZE, SIZE);
-        for (const w of orderWays(d, keepWay)) drawWay(lctx, proj, w, 1, keepFor(w));
+        for (const w of orderWays(d, keepWay)) drawWay(lctx, proj, w, 1, fadeFor(w));
         compositeRoads(ctx, layer, dpr, shapeMask);
       } else {
-        for (const w of orderWays(d, keepWay)) drawWay(ctx, proj, w, 1, keepFor(w));
+        for (const w of orderWays(d, keepWay)) drawWay(ctx, proj, w, 1, fadeFor(w));
       }
       roadsDrawnRef.current = orderWays(d, keepWay).length;
     },
@@ -571,27 +599,34 @@ export default function RoadColors({
   const downloadSVG = () => {
     if (!data) return;
     const proj = makeProjector(data.center, data.radius, SIZE, view);
-    const dissolve = fade ? makeDissolve(SIZE, SIZE, { seed: 7 }) : null;
+    const fieldFade = fade ? makeFade(SIZE, SIZE, { seed: 7 }) : null;
     const f = (n: number) => Math.round(n * 10) / 10;
     let body = "";
     for (const d of REVEAL_ORDER) {
       const group = data.ways.filter((w) => w.designation === d && keepWay(w));
       if (!group.length) continue;
-      const dStr = group
+      const paths = group
         .map((w) => {
           const pts: number[] = [];
           for (const p of w.pts) {
             const q = proj(p);
             pts.push(q.x, q.y);
           }
-          const keep = dissolve
-            ? (x: number, y: number) => dissolve(wayKey(w), x, y)
+          const fadeOpts = fieldFade
+            ? {
+                keep: (x: number, y: number) =>
+                  fieldFade.keep(wayKey(w), x, y),
+                alpha: (x: number, y: number) =>
+                  fieldFade.alpha(wayKey(w), x, y),
+                width: (x: number, y: number) =>
+                  fieldFade.width(wayKey(w), x, y),
+              }
             : null;
-          return svgRuns(pts, keep, f);
+          return svgFadedPaths(pts, strokeFor(d), fadeOpts, f);
         })
-        .join(" ");
-      if (dStr)
-        body += `<path d="${dStr}" stroke="${colorFor()}" stroke-width="${strokeFor(d).toFixed(2)}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`;
+        .join("");
+      if (paths)
+        body += `<g stroke="${colorFor()}" fill="none" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`;
     }
     const clipHref = shapeMask
       ? shapeMask.toDataURL("image/png")
