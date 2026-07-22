@@ -195,10 +195,10 @@ button {
 }
 
 .mode-rail__panel--tool {
-  /* Keep Branch ↔ Field from resizing the card; spare height is empty space.
-     Height matches the canvas stage beside it. */
-  height: var(--tool-stage-h);
-  max-height: var(--tool-stage-h);
+  /* Controls keep their natural height — independent of the canvas stage, which
+     changes with the aspect ratio. Only cap to the viewport so a very tall stack
+     scrolls instead of running off-screen. */
+  max-height: calc(100vh - 48px);
   overflow-y: auto;
 }
 
@@ -1301,20 +1301,19 @@ button {
   grid-template-columns: minmax(340px, 440px) 1fr;
 }
 
-/* Canvas-only (controls live in the mode-rail panel). */
+/* Canvas-only (controls live in the mode-rail panel). The box locks to the
+   canvas aspect ratio so the preview never stretches; it fills the available
+   width up to a max that keeps the stage within the viewport height. */
 .specimen-tree--viewport:not(.specimen-tree--wide-controls) {
   grid-template-columns: 1fr;
-  /* Same height as the left panel; width follows the canvas aspect ratio. */
   position: sticky;
   top: 24px;
   align-self: start;
-  height: var(--tool-stage-h);
-  max-height: var(--tool-stage-h);
-  min-height: 0;
-  width: min(
-    100%,
-    calc(var(--tool-stage-h) * var(--canvas-ar-w, 1) / var(--canvas-ar-h, 1))
+  width: 100%;
+  max-width: calc(
+    (100vh - 120px) * var(--canvas-ar-w, 1) / var(--canvas-ar-h, 1)
   );
+  aspect-ratio: var(--canvas-ar-w, 1) / var(--canvas-ar-h, 1);
   overflow: hidden;
 }
 

@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import snapshotUrl from "../data/sf-bay-roads.json?url";
+import AspectRatioControl from "../components/AspectRatioControl";
 import ExportButtons from "../components/ExportButtons";
 import ParamValueInput from "../components/ParamValueInput";
 import RecordButton from "../components/RecordButton";
 import { useCanvasRecorder, useStopRecordWhenAnimatingEnds } from "../hooks/useCanvasRecorder";
-import { EXPORT_WIDTH, setCanvasAspectVars } from "./aspectRatio";
+import { useCanvasDimensions } from "../hooks/useCanvasDimensions";
+import { setCanvasAspectVars } from "./aspectRatio";
 import { renderPngBlob } from "./exportCanvas";
 import { safeColor } from "./specimenTreeCore";
 import { makeFade, strokeFaded, svgFadedPaths } from "./dissolveFade";
 import {
   REVEAL_ORDER,
-  buildShapeMask,
+  fetchRoads,
+  geocode,
   isArterialHighway,
   loadSnapshot,
   makeProjector,
@@ -34,8 +37,9 @@ const wayKey = (w: RoadWay) =>
     ? (Math.round(w.pts[0].lat * 1e5) ^ Math.round(w.pts[0].lon * 1e5)) >>> 0
     : 0;
 
-// Square render size. Road network is projected into this frame.
-const SIZE = 1000;
+// Native preview area — the actual pixel dimensions come from the size picker
+// (dimsForPreview keeps this area but reshapes to the chosen aspect ratio).
+const ROAD_BASE = 1000;
 const DEFAULT_ZOOM = 2.2;
 const DEFAULT_VIEW: View = { zoom: DEFAULT_ZOOM, panX: 0, panY: 0 };
 const BG = "#F8FFEE";
@@ -91,30 +95,28 @@ export default function RoadColors({
   const rafRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const dataRef = useRef<RoadData | null>(null);
-  const roadsLayerRef = useRef<HTMLCanvasElement | null>(null);
-  const maskLayerRef = useRef<HTMLCanvasElement | null>(null);
   const roadsDrawnRef = useRef(0);
   const [animating, setAnimating] = useState(false);
+
+  const { w, h, exportDims, config, setConfig } = useCanvasDimensions(
+    ROAD_BASE,
+    ROAD_BASE,
+  );
 
   const [weight, setWeight] = useState(1.1);
   const [bg, setBg] = useState(BG);
   const [ink, setInk] = useState(INK);
   const [fade, setFade] = useState(true);
 
+  // Location the roads are fetched around. Default matches the bundled snapshot
+  // loaded on first open; typing a new place fetches it live from Overpass.
+  const [place, setPlace] = useState("San Francisco, California");
+  const [radiusKm, setRadiusKm] = useState(4);
+
   // View transform — zoom about the centre + pan in px. Decoupled from the
   // fetch radius, so zooming never re-downloads.
   const [view, setView] = useState<View>(DEFAULT_VIEW);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
-
-  // Optional silhouette — roads are clipped to the shape (PNG/SVG alpha or dark fill).
-  const [shapeImage, setShapeImage] = useState<HTMLImageElement | null>(null);
-  const [shapeImageUrl, setShapeImageUrl] = useState("");
-  const [shapeImageName, setShapeImageName] = useState("");
-
-  const shapeMask = useMemo(
-    () => (shapeImage ? buildShapeMask(shapeImage, SIZE) : null),
-    [shapeImage],
-  );
 
   const [data, setData] = useState<RoadData | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
@@ -157,18 +159,19 @@ export default function RoadColors({
     [colorFor, strokeFor],
   );
 
-  // Paint the square background. Roads draw on a separate layer when masked.
+  // Paint the background across the whole frame.
   const prepare = useCallback(
     (
       ctx: CanvasRenderingContext2D,
       dpr: number,
       background: string,
-      mapSize = SIZE,
+      mapW: number,
+      mapH: number,
     ) => {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (background !== "transparent") {
         ctx.fillStyle = background;
-        ctx.fillRect(0, 0, mapSize, mapSize);
+        ctx.fillRect(0, 0, mapW, mapH);
       }
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
@@ -176,47 +179,8 @@ export default function RoadColors({
     [],
   );
 
-  const getRoadsLayer = useCallback((dpr: number) => {
-    let layer = roadsLayerRef.current;
-    if (!layer) {
-      layer = document.createElement("canvas");
-      roadsLayerRef.current = layer;
-    }
-    layer.width = SIZE * dpr;
-    layer.height = SIZE * dpr;
-    const lctx = layer.getContext("2d")!;
-    lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { layer, lctx };
-  }, []);
-
-  const compositeRoads = useCallback(
-    (
-      ctx: CanvasRenderingContext2D,
-      roadsCanvas: HTMLCanvasElement,
-      dpr: number,
-      mask: HTMLCanvasElement,
-      mapSize = SIZE,
-    ) => {
-      let masked = maskLayerRef.current;
-      if (!masked) {
-        masked = document.createElement("canvas");
-        maskLayerRef.current = masked;
-      }
-      const pw = mapSize * dpr;
-      masked.width = pw;
-      masked.height = pw;
-      const mctx = masked.getContext("2d")!;
-      mctx.setTransform(1, 0, 0, 1, 0, 0);
-      mctx.clearRect(0, 0, pw, pw);
-      mctx.drawImage(roadsCanvas, 0, 0);
-      mctx.globalCompositeOperation = "destination-in";
-      mctx.drawImage(mask, 0, 0, pw, pw);
-      mctx.globalCompositeOperation = "source-over";
-      ctx.drawImage(masked, 0, 0, mapSize, mapSize);
-    },
-    [],
-  );
-
+  // Draw the whole network into a frame of renderW × renderH px. Used for the
+  // export/record path (the live preview uses animate / renderStatic below).
   const drawRoadsFrame = useCallback(
     (
       ctx: CanvasRenderingContext2D,
@@ -224,40 +188,28 @@ export default function RoadColors({
       d: RoadData,
       roadCount: number,
       transparent: boolean,
-      pixelWidth?: number,
+      renderW: number,
+      renderH: number,
     ) => {
-      const strokeScale = pixelWidth ? pixelWidth / SIZE : 1;
-      const mapSize = pixelWidth ?? SIZE;
+      const strokeScale = renderW / w;
       const background = transparent ? "transparent" : safeColor(bg, BG);
-      prepare(ctx, dpr, background, mapSize);
-      const proj = makeProjector(d.center, d.radius, mapSize, view);
+      prepare(ctx, dpr, background, renderW, renderH);
+      const proj = makeProjector(d.center, d.radius, renderW, renderH, view);
       const ordered = orderWays(d, keepWay);
       const n = Math.min(roadCount, ordered.length);
-      const fieldFade = fade ? makeFade(mapSize, mapSize, { seed: 7 }) : null;
-      const fadeFor = (w: RoadWay) =>
+      const fieldFade = fade ? makeFade(renderW, renderH, { seed: 7 }) : null;
+      const fadeFor = (way: RoadWay) =>
         fieldFade
           ? {
-              keep: (x: number, y: number) => fieldFade.keep(wayKey(w), x, y),
-              alpha: (x: number, y: number) =>
-                fieldFade.alpha(wayKey(w), x, y),
-              width: (x: number, y: number) =>
-                fieldFade.width(wayKey(w), x, y),
+              keep: (x: number, y: number) => fieldFade.keep(wayKey(way), x, y),
+              alpha: (x: number, y: number) => fieldFade.alpha(wayKey(way), x, y),
+              width: (x: number, y: number) => fieldFade.width(wayKey(way), x, y),
             }
           : null;
-      if (shapeMask) {
-        const layer = document.createElement("canvas");
-        layer.width = mapSize * dpr;
-        layer.height = mapSize * dpr;
-        const lctx = layer.getContext("2d")!;
-        lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        lctx.clearRect(0, 0, mapSize, mapSize);
-        for (let ri = 0; ri < n; ri++) drawWay(lctx, proj, ordered[ri], strokeScale, fadeFor(ordered[ri]));
-        compositeRoads(ctx, layer, dpr, shapeMask, mapSize);
-      } else {
-        for (let ri = 0; ri < n; ri++) drawWay(ctx, proj, ordered[ri], strokeScale, fadeFor(ordered[ri]));
-      }
+      for (let ri = 0; ri < n; ri++)
+        drawWay(ctx, proj, ordered[ri], strokeScale, fadeFor(ordered[ri]));
     },
-    [bg, prepare, drawWay, view, keepWay, shapeMask, compositeRoads, fade],
+    [w, bg, prepare, drawWay, view, keepWay, fade],
   );
 
   // Animate the network filling in. Cancels any prior run.
@@ -270,24 +222,19 @@ export default function RoadColors({
       setAnimating(true);
 
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = SIZE * dpr;
-      canvas.height = SIZE * dpr;
-      setCanvasAspectVars(canvas, SIZE, SIZE);
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      setCanvasAspectVars(canvas, w, h);
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
       const background = safeColor(bg, BG);
-      prepare(ctx, dpr, background);
-      const proj = makeProjector(d.center, d.radius, SIZE, view);
+      prepare(ctx, dpr, background, w, h);
+      const proj = makeProjector(d.center, d.radius, w, h, view);
       const ordered = orderWays(d, keepWay);
       roadsDrawnRef.current = 0;
-      const useMask = !!shapeMask;
-      const { lctx: roadsCtx, layer: roadsLayer } = useMask
-        ? getRoadsLayer(dpr)
-        : { lctx: ctx, layer: null as HTMLCanvasElement | null };
-      if (useMask) roadsCtx.clearRect(0, 0, SIZE, SIZE);
 
-      const fieldFade = fade ? makeFade(SIZE, SIZE, { seed: 7 }) : null;
+      const fieldFade = fade ? makeFade(w, h, { seed: 7 }) : null;
       const frames = Math.max(1, Math.round(FILL_IN_SEC * 60));
       const perFrame = Math.max(1, Math.ceil(ordered.length / frames));
       let i = 0;
@@ -296,7 +243,7 @@ export default function RoadColors({
         for (; i < end; i++) {
           const way = ordered[i];
           drawWay(
-            roadsCtx,
+            ctx,
             proj,
             way,
             1,
@@ -310,10 +257,6 @@ export default function RoadColors({
           );
         }
         roadsDrawnRef.current = i;
-        if (useMask && shapeMask && roadsLayer) {
-          prepare(ctx, dpr, background);
-          compositeRoads(ctx, roadsLayer, dpr, shapeMask);
-        }
         if (i < ordered.length) rafRef.current = requestAnimationFrame(step);
         else {
           rafRef.current = null;
@@ -323,21 +266,11 @@ export default function RoadColors({
       };
       step();
     },
-    [
-      bg,
-      prepare,
-      drawWay,
-      view,
-      keepWay,
-      shapeMask,
-      getRoadsLayer,
-      compositeRoads,
-      fade,
-    ],
+    [w, h, bg, prepare, drawWay, view, keepWay, fade],
   );
 
-  // Instant, un-animated redraw — used for color / weight / background tweaks
-  // so dragging a picker doesn't replay the whole fill-in.
+  // Instant, un-animated redraw — used for color / weight / background / size
+  // tweaks so dragging a picker doesn't replay the whole fill-in.
   const renderStatic = useCallback(
     (d: RoadData) => {
       const canvas = canvasRef.current;
@@ -346,45 +279,26 @@ export default function RoadColors({
       rafRef.current = null;
       setAnimating(false);
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = SIZE * dpr;
-      canvas.height = SIZE * dpr;
-      setCanvasAspectVars(canvas, SIZE, SIZE);
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      setCanvasAspectVars(canvas, w, h);
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      prepare(ctx, dpr, safeColor(bg, BG));
-      const proj = makeProjector(d.center, d.radius, SIZE, view);
-      const fieldFade = fade ? makeFade(SIZE, SIZE, { seed: 7 }) : null;
-      const fadeFor = (w: RoadWay) =>
+      prepare(ctx, dpr, safeColor(bg, BG), w, h);
+      const proj = makeProjector(d.center, d.radius, w, h, view);
+      const fieldFade = fade ? makeFade(w, h, { seed: 7 }) : null;
+      const fadeFor = (way: RoadWay) =>
         fieldFade
           ? {
-              keep: (x: number, y: number) => fieldFade.keep(wayKey(w), x, y),
-              alpha: (x: number, y: number) =>
-                fieldFade.alpha(wayKey(w), x, y),
-              width: (x: number, y: number) =>
-                fieldFade.width(wayKey(w), x, y),
+              keep: (x: number, y: number) => fieldFade.keep(wayKey(way), x, y),
+              alpha: (x: number, y: number) => fieldFade.alpha(wayKey(way), x, y),
+              width: (x: number, y: number) => fieldFade.width(wayKey(way), x, y),
             }
           : null;
-      if (shapeMask) {
-        const { lctx, layer } = getRoadsLayer(dpr);
-        lctx.clearRect(0, 0, SIZE, SIZE);
-        for (const w of orderWays(d, keepWay)) drawWay(lctx, proj, w, 1, fadeFor(w));
-        compositeRoads(ctx, layer, dpr, shapeMask);
-      } else {
-        for (const w of orderWays(d, keepWay)) drawWay(ctx, proj, w, 1, fadeFor(w));
-      }
+      for (const way of orderWays(d, keepWay)) drawWay(ctx, proj, way, 1, fadeFor(way));
       roadsDrawnRef.current = orderWays(d, keepWay).length;
     },
-    [
-      bg,
-      prepare,
-      drawWay,
-      view,
-      keepWay,
-      shapeMask,
-      getRoadsLayer,
-      compositeRoads,
-      fade,
-    ],
+    [w, h, bg, prepare, drawWay, view, keepWay, fade],
   );
 
   useEffect(() => {
@@ -402,27 +316,14 @@ export default function RoadColors({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
-  // Style / view change (color, weight, background, image, zoom, pan, filter) →
-  // instant redraw, no animation. Skip while a fill-in is in flight so the
-  // animation triggered by a fresh fetch (which also moves the view) isn't
-  // cancelled the moment it starts.
+  // Style / view / size change → instant redraw, no animation. Skip while a
+  // fill-in is in flight so the fresh-fetch animation isn't cancelled at start.
   useEffect(() => {
     if (rafRef.current) return;
     const d = dataRef.current;
     if (d) renderStatic(d);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weight, bg, view, shapeMask, ink, fade]);
-
-  // New shape → replay fill-in so roads grow into the silhouette.
-  const didMountShape = useRef(false);
-  useEffect(() => {
-    if (!didMountShape.current) {
-      didMountShape.current = true;
-      return;
-    }
-    if (dataRef.current) animate(dataRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shapeMask]);
+  }, [weight, bg, view, ink, fade, w, h]);
 
   // Load the saved Bay Area snapshot (no network round-trip to Overpass).
   const loadSaved = useCallback(async () => {
@@ -446,6 +347,35 @@ export default function RoadColors({
     loadSaved();
   }, [loadSaved]);
 
+  // Geocode the typed location and fetch its road network live from Overpass.
+  const fetchPlace = useCallback(async () => {
+    const query = place.trim();
+    if (!query) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setStatus({ kind: "loading", msg: "Finding place…" });
+    try {
+      const g = await geocode(query);
+      if (ac.signal.aborted) return;
+      setStatus({
+        kind: "loading",
+        msg: `Fetching roads near ${g.label.split(",")[0]}…`,
+      });
+      const d = await fetchRoads(g.lat, g.lon, radiusKm * 1000, g.label, ac.signal);
+      if (ac.signal.aborted) return;
+      setView(DEFAULT_VIEW);
+      setData(d);
+      setStatus({ kind: "ready" });
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return;
+      setStatus({
+        kind: "error",
+        msg: (e as Error).message || "Couldn't load that place.",
+      });
+    }
+  }, [place, radiusKm]);
+
   // Replay the fill-in animation on the current data.
   const grow = useCallback(() => {
     if (dataRef.current) animate(dataRef.current);
@@ -460,13 +390,13 @@ export default function RoadColors({
     const d = dataRef.current;
     if (!d) return null;
     return {
-      width: EXPORT_WIDTH,
-      height: EXPORT_WIDTH,
+      width: exportDims.w,
+      height: exportDims.h,
       render: (ctx: CanvasRenderingContext2D, dpr: number) => {
-        drawRoadsFrame(ctx, dpr, d, roadsDrawnRef.current, false, EXPORT_WIDTH);
+        drawRoadsFrame(ctx, dpr, d, roadsDrawnRef.current, false, exportDims.w, exportDims.h);
       },
     };
-  }, [drawRoadsFrame]);
+  }, [drawRoadsFrame, exportDims]);
 
   const recorder = useCanvasRecorder(
     () => canvasRef.current,
@@ -492,21 +422,24 @@ export default function RoadColors({
   // ----- zoom / pan -----
   const MAX_ZOOM = 16;
 
-  // Zoom about a point given in SIZE-space (defaults to canvas centre).
-  const zoomAt = useCallback((factor: number, mx = SIZE / 2, my = SIZE / 2) => {
-    setView((v) => {
-      const nz = clamp(v.zoom * factor, 1, MAX_ZOOM);
-      const k = nz / v.zoom;
-      const cx = SIZE / 2;
-      const cy = SIZE / 2;
-      const m = maxPan(SIZE, nz);
-      return {
-        zoom: nz,
-        panX: clamp(mx - cx - (mx - cx - v.panX) * k, -m, m),
-        panY: clamp(my - cy - (my - cy - v.panY) * k, -m, m),
-      };
-    });
-  }, []);
+  // Zoom about a point given in preview px (defaults to canvas centre).
+  const zoomAt = useCallback(
+    (factor: number, mx = w / 2, my = h / 2) => {
+      setView((v) => {
+        const nz = clamp(v.zoom * factor, 1, MAX_ZOOM);
+        const k = nz / v.zoom;
+        const cx = w / 2;
+        const cy = h / 2;
+        const m = maxPan(w, h, nz);
+        return {
+          zoom: nz,
+          panX: clamp(mx - cx - (mx - cx - v.panX) * k, -m.x, m.x),
+          panY: clamp(my - cy - (my - cy - v.panY) * k, -m.y, m.y),
+        };
+      });
+    },
+    [w, h],
+  );
 
   const resetView = useCallback(() => setView(DEFAULT_VIEW), []);
 
@@ -518,13 +451,13 @@ export default function RoadColors({
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect();
-      const mx = ((e.clientX - rect.left) / rect.width) * SIZE;
-      const my = ((e.clientY - rect.top) / rect.height) * SIZE;
+      const mx = ((e.clientX - rect.left) / rect.width) * w;
+      const my = ((e.clientY - rect.top) / rect.height) * h;
       zoomAt(e.deltaY < 0 ? 1.12 : 1 / 1.12, mx, my);
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
-  }, [zoomAt]);
+  }, [zoomAt, w, h]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (view.zoom <= 1) return;
@@ -536,16 +469,15 @@ export default function RoadColors({
     const canvas = canvasRef.current;
     if (!d || !canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const s = SIZE / rect.width;
-    const dx = (e.clientX - d.x) * s;
-    const dy = (e.clientY - d.y) * s;
+    const dx = (e.clientX - d.x) * (w / rect.width);
+    const dy = (e.clientY - d.y) * (h / rect.height);
     dragRef.current = { x: e.clientX, y: e.clientY };
     setView((v) => {
-      const m = maxPan(SIZE, v.zoom);
+      const m = maxPan(w, h, v.zoom);
       return {
         ...v,
-        panX: clamp(v.panX + dx, -m, m),
-        panY: clamp(v.panY + dy, -m, m),
+        panX: clamp(v.panX + dx, -m.x, m.x),
+        panY: clamp(v.panY + dy, -m.y, m.y),
       };
     });
   };
@@ -553,36 +485,12 @@ export default function RoadColors({
     dragRef.current = null;
   };
 
-  // ----- shape mask image -----
-  const onPickShape = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const url = reader.result as string;
-      const img = new Image();
-      img.onload = () => {
-        setShapeImage(img);
-        setShapeImageUrl(url);
-        setShapeImageName(file.name);
-      };
-      img.src = url;
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  };
-  const clearShape = () => {
-    setShapeImage(null);
-    setShapeImageUrl("");
-    setShapeImageName("");
-  };
-
   // ----- exports -----
   const download = (blob: Blob, ext: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `road-colors-${(data?.place || "map").split(",")[0].trim().replace(/\s+/g, "-").toLowerCase()}.${ext}`;
+    a.download = `road-colors-${recordName}.${ext}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -591,50 +499,50 @@ export default function RoadColors({
 
   const downloadPNG = (transparent: boolean) => {
     if (!data) return;
-    void renderPngBlob(EXPORT_WIDTH, EXPORT_WIDTH, (ctx, dpr) => {
-      drawRoadsFrame(ctx, dpr, data, orderWays(data, keepWay).length, transparent, EXPORT_WIDTH);
+    void renderPngBlob(exportDims.w, exportDims.h, (ctx, dpr) => {
+      drawRoadsFrame(
+        ctx,
+        dpr,
+        data,
+        orderWays(data, keepWay).length,
+        transparent,
+        exportDims.w,
+        exportDims.h,
+      );
     }).then((b) => b && download(b, "png"));
   };
 
   const downloadSVG = () => {
     if (!data) return;
-    const proj = makeProjector(data.center, data.radius, SIZE, view);
-    const fieldFade = fade ? makeFade(SIZE, SIZE, { seed: 7 }) : null;
+    const proj = makeProjector(data.center, data.radius, exportDims.w, exportDims.h, view);
+    const fieldFade = fade ? makeFade(exportDims.w, exportDims.h, { seed: 7 }) : null;
+    const strokeScale = exportDims.w / w;
     const f = (n: number) => Math.round(n * 10) / 10;
     let body = "";
     for (const d of REVEAL_ORDER) {
-      const group = data.ways.filter((w) => w.designation === d && keepWay(w));
+      const group = data.ways.filter((wy) => wy.designation === d && keepWay(wy));
       if (!group.length) continue;
       const paths = group
-        .map((w) => {
+        .map((wy) => {
           const pts: number[] = [];
-          for (const p of w.pts) {
+          for (const p of wy.pts) {
             const q = proj(p);
             pts.push(q.x, q.y);
           }
           const fadeOpts = fieldFade
             ? {
-                keep: (x: number, y: number) =>
-                  fieldFade.keep(wayKey(w), x, y),
-                alpha: (x: number, y: number) =>
-                  fieldFade.alpha(wayKey(w), x, y),
-                width: (x: number, y: number) =>
-                  fieldFade.width(wayKey(w), x, y),
+                keep: (x: number, y: number) => fieldFade.keep(wayKey(wy), x, y),
+                alpha: (x: number, y: number) => fieldFade.alpha(wayKey(wy), x, y),
+                width: (x: number, y: number) => fieldFade.width(wayKey(wy), x, y),
               }
             : null;
-          return svgFadedPaths(pts, strokeFor(d), fadeOpts, f);
+          return svgFadedPaths(pts, strokeFor(d, strokeScale), fadeOpts, f);
         })
         .join("");
       if (paths)
         body += `<g stroke="${colorFor()}" fill="none" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`;
     }
-    const clipHref = shapeMask
-      ? shapeMask.toDataURL("image/png")
-      : shapeImageUrl;
-    const clipDef = clipHref
-      ? `<clipPath id="shape"><image href="${clipHref}" x="0" y="0" width="${SIZE}" height="${SIZE}" preserveAspectRatio="xMidYMid meet"/></clipPath>`
-      : `<clipPath id="shape"><rect width="${SIZE}" height="${SIZE}"/></clipPath>`;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${EXPORT_WIDTH}" height="${EXPORT_WIDTH}" viewBox="0 0 ${SIZE} ${SIZE}"><defs>${clipDef}</defs><rect width="${SIZE}" height="${SIZE}" fill="${safeColor(bg, BG)}"/><g clip-path="url(#shape)">${body}</g></svg>`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${exportDims.w}" height="${exportDims.h}" viewBox="0 0 ${exportDims.w} ${exportDims.h}"><rect width="${exportDims.w}" height="${exportDims.h}" fill="${safeColor(bg, BG)}"/>${body}</svg>`;
     download(new Blob([svg], { type: "image/svg+xml" }), "svg");
   };
 
@@ -675,6 +583,51 @@ export default function RoadColors({
 
   const controls = (
     <>
+      <div className="specimen-tree__group">
+        <span className="specimen-tree__group-title">Location</span>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void fetchPlace();
+          }}
+          style={{ display: "flex", flexDirection: "column", gap: 8 }}
+        >
+          <input
+            type="text"
+            value={place}
+            spellCheck={false}
+            placeholder="City, region, or address"
+            aria-label="Map location"
+            onChange={(e) => setPlace(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "8px 10px",
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              background: "var(--bg)",
+              color: "var(--ink)",
+              font: "inherit",
+            }}
+          />
+          <div className="specimen-tree__sliders">
+            {slider("Radius", radiusKm, 1, 15, 0.5, setRadiusKm, " km")}
+          </div>
+          <button
+            type="submit"
+            className="btn"
+            disabled={loading || !place.trim()}
+            style={{ justifyContent: "center" }}
+          >
+            {loading ? "Loading…" : "Fetch this place"}
+          </button>
+        </form>
+      </div>
+
+      <div className="specimen-tree__group">
+        <span className="specimen-tree__group-title">Canvas</span>
+        <AspectRatioControl value={config} onChange={setConfig} disabled={loading} />
+      </div>
+
       <div className="specimen-tree__group">
         <label
           className="tool-param-row has-tip"
@@ -762,36 +715,6 @@ export default function RoadColors({
             />
           </span>
         </label>
-        <div
-          className="specimen-tree__actions"
-          style={{ flexWrap: "wrap" }}
-        >
-          <label className="btn" style={{ cursor: "pointer" }}>
-            {shapeImage ? "Replace image" : "Add image"}
-            <input
-              type="file"
-              accept="image/*,.svg"
-              onChange={onPickShape}
-              style={{ display: "none" }}
-            />
-          </label>
-          {shapeImage && (
-            <button type="button" className="btn" onClick={clearShape}>
-              Remove
-            </button>
-          )}
-        </div>
-        {shapeImage && (
-          <span className="specimen-tree__upload-name">
-            {shapeImageName}
-          </span>
-        )}
-        <p
-          className="specimen-tree__upload-name"
-          style={{ margin: "8px 0 0" }}
-        >
-          PNG or SVG silhouette — the road map fills inside the shape.
-        </p>
       </div>
 
       {data && (
@@ -879,9 +802,9 @@ export default function RoadColors({
             onPointerUp={onPointerUp}
             onPointerLeave={onPointerUp}
             style={{
-              maxHeight: "100%",
-              maxWidth: "100%",
-              aspectRatio: "1 / 1",
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
               boxShadow: "0 8px 40px rgba(0,0,0,0.18)",
               cursor:
                 view.zoom > 1

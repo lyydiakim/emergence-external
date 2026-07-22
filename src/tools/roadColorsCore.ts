@@ -399,7 +399,8 @@ export interface View {
 export function makeProjector(
   center: LatLng,
   radius: number,
-  size: number,
+  w: number,
+  h: number,
   view?: View,
 ) {
   const mPerDegLat = 111320;
@@ -407,9 +408,12 @@ export function makeProjector(
   const zoom = view?.zoom ?? 1;
   const panX = view?.panX ?? 0;
   const panY = view?.panY ?? 0;
-  const scale = (size / 2 / radius) * zoom; // px per metre
-  const cx = size / 2;
-  const cy = size / 2;
+  // Uniform scale (no distortion), based on the longer edge so the fetched
+  // radius covers the frame — the shorter edge is cropped rather than
+  // letterboxed. A square (w === h) keeps the original framing.
+  const scale = (Math.max(w, h) / 2 / radius) * zoom; // px per metre
+  const cx = w / 2;
+  const cy = h / 2;
   return (p: LatLng) => {
     const ex = (p.lon - center.lon) * mPerDegLon;
     const ny = (p.lat - center.lat) * mPerDegLat;
@@ -417,9 +421,13 @@ export function makeProjector(
   };
 }
 
-/** Largest pan (px) that keeps zoomed content covering the square. */
-export function maxPan(size: number, zoom: number) {
-  return (size * Math.max(0, zoom - 1)) / 2;
+/** Largest pan (px) per axis that keeps zoomed content covering the frame. */
+export function maxPan(w: number, h: number, zoom: number): { x: number; y: number } {
+  const content = Math.max(w, h) * zoom;
+  return {
+    x: Math.max(0, (content - w) / 2),
+    y: Math.max(0, (content - h) / 2),
+  };
 }
 
 /** Designations actually present, in reveal order. */

@@ -41,8 +41,8 @@ export const DEFAULT_ROOT: RootParams = {
   seed: 1207,
   crowns: 1,
   density: 1700,
-  downwardBias: 0.55,
-  lateralReach: 60,
+  downwardBias: 0.35,
+  lateralReach: 42,
   taprootThickness: 1.5,
   thickness: 0.4,
   // Gentle end shaping and moderate tendril curl.
@@ -834,10 +834,17 @@ export function growRoots(
   // so a positive taper reads as a rounded knob rather than a long wedge.
   const organicBallLen = 12 + taperAmt * 30;
 
+  // "Line weight" is the single width control exposed in the UI (`thickness`).
+  // Laterals track it directly; this factor propagates the same relative change
+  // to the otherwise-fixed widths (main taproot, engineered terminal pad) so the
+  // slider scales EVERY line evenly rather than just the laterals.
+  const lineScale = p.thickness / DEFAULT_ROOT.thickness;
+
   // Engineered trace base width per tier. The main taproot tracks the `main root`
-  // slider; laterals track `lateral thickness` (×4 keeps the default ≈ 0.8).
+  // slider (scaled by line weight); laterals track `line weight` directly (×4
+  // keeps the default ≈ 0.8).
   const engineeredBaseW = (main: boolean) =>
-    main ? p.taprootThickness : p.thickness * 4;
+    main ? p.taprootThickness * lineScale : p.thickness * 4;
 
   const edges: RootEdge[] = [];
   const nodeW = new Float64Array(N); // final stroke width per node, for curls
@@ -854,8 +861,9 @@ export function growRoots(
       // the separate pass below.
       w = engineeredBaseW(main);
     } else if (main) {
-      // Taproot stem: fixed slender width — don't balloon with subtree size.
-      w = p.taprootThickness * (1.05 - pathFrac * 0.2);
+      // Taproot stem: slender width scaled by line weight — don't balloon with
+      // subtree size.
+      w = p.taprootThickness * lineScale * (1.05 - pathFrac * 0.2);
     } else {
       // Organic: even body weight, with the bipolar `taper` reshaping the tip.
       if (taperAmt > 0) {
@@ -963,8 +971,9 @@ export function growRoots(
     }
     const BALL_LEN = 20; // px of trace that fattens toward the tip
     // Terminal width is ABSOLUTE (px), independent of the connecting trace, so
-    // thin and thick traces get the same-size end.
-    const END_W = p.endThickness;
+    // thin and thick traces get the same-size end. Scaled by line weight so it
+    // grows in step with every other stroke.
+    const END_W = p.endThickness * lineScale;
     const STEP = 2; // fine sub-segment length → many small width steps
     for (let i = 0; i < N; i++) {
       if (!keep[i] || parent[i] < 0 || keptKids[i] > 0) continue; // kept ends

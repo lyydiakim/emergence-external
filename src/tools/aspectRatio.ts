@@ -59,7 +59,9 @@ export function clampExportDim(n: number): number {
 }
 
 export function clampCustomDims(w: number, h: number): { w: number; h: number } {
-  return { w: evenDim(clampExportDim(w)), h: evenDim(clampExportDim(h)) };
+  // Any integer size is allowed; the MP4 recorder evens dimensions itself at
+  // encode time (H.264 needs even), so we don't force it on the user's input.
+  return { w: clampExportDim(w), h: clampExportDim(h) };
 }
 
 export function resolveExportDims(config: CanvasSizeConfig): { w: number; h: number } {
