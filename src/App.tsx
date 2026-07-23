@@ -38,6 +38,7 @@ const FIELD_TOOL: Record<Brush, Record<Style, string>> = {
 
 export default function App() {
   // Nested-toggle nav. Branch/Field × Organic/Engineered × Abstract/Topographic.
+  // Branch is Organic-only — the Brush toggle shows only in Field mode.
   const [family, setFamily] = useState<Family>('branch');
   const [brush, setBrush] = useState<Brush>('organic');
   const [style, setStyle] = useState<Style>('abstract');
@@ -89,22 +90,24 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="mode-rail__group">
-                <span className="mode-rail__label">Brush</span>
-                <div className="seg seg--alt" role="group" aria-label="Brush">
-                  {(['organic', 'engineered'] as Brush[]).map((b) => (
-                    <button
-                      key={b}
-                      type="button"
-                      className={`seg__opt${b === brush ? ' seg__opt--active' : ''}`}
-                      aria-pressed={b === brush}
-                      onClick={() => setBrush(b)}
-                    >
-                      {b === 'organic' ? 'Organic' : 'Engineered'}
-                    </button>
-                  ))}
+              {family === 'field' && (
+                <div className="mode-rail__group">
+                  <span className="mode-rail__label">Brush</span>
+                  <div className="seg seg--alt" role="group" aria-label="Brush">
+                    {(['organic', 'engineered'] as Brush[]).map((b) => (
+                      <button
+                        key={b}
+                        type="button"
+                        className={`seg__opt${b === brush ? ' seg__opt--active' : ''}`}
+                        aria-pressed={b === brush}
+                        onClick={() => setBrush(b)}
+                      >
+                        {b === 'organic' ? 'Organic' : 'Engineered'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {family === 'field' && (
                 <div className="mode-rail__group">
@@ -135,12 +138,11 @@ export default function App() {
 
         <main className="app-main">
           {/* Remount on tool change so each engine resets its canvas/state cleanly.
-              Root Brush's brush is controlled here so it survives the remount. */}
+              Root Brush is always Organic (Branch has no Engineered brush). */}
           {active.id === 'root-brush' ? (
             <RootBrush
               key="root-brush"
-              brush={brush}
-              onBrushChange={setBrush}
+              brush="organic"
               hideBrushToggle
               controlsTarget={toolControlsHost}
             />
