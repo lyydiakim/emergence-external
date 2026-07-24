@@ -205,11 +205,28 @@ export default function RootBrush({
     drawRef.current = draw;
   });
   const drawRaf = useRef(0);
+  const drawFallback = useRef<number | undefined>(undefined);
   const scheduleDraw = useCallback(() => {
     cancelAnimationFrame(drawRaf.current);
-    drawRaf.current = requestAnimationFrame(() => drawRef.current());
+    window.clearTimeout(drawFallback.current);
+    drawRaf.current = requestAnimationFrame(() => {
+      window.clearTimeout(drawFallback.current);
+      drawRef.current();
+    });
+    // rAF never fires in a hidden/occluded tab — without this fallback the
+    // canvas stays blank until the tab becomes visible.
+    drawFallback.current = window.setTimeout(() => {
+      cancelAnimationFrame(drawRaf.current);
+      drawRef.current();
+    }, 150);
   }, []);
-  useEffect(() => () => cancelAnimationFrame(drawRaf.current), []);
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(drawRaf.current);
+      window.clearTimeout(drawFallback.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     scheduleDraw();

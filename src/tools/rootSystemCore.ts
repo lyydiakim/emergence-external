@@ -1248,6 +1248,50 @@ function stampSteps(stamp: StampOpts): { blur: number; cut: number }[] {
 // allocate full canvases per tick.
 let stampSrc: HTMLCanvasElement | null = null;
 let stampOut: HTMLCanvasElement | null = null;
+// Scratch canvases for stepped downscaling of the treated bitmap.
+let stepA: HTMLCanvasElement | null = null;
+let stepB: HTMLCanvasElement | null = null;
+
+// Composite `src` onto `dctx` at dw×dh, halving in steps while the shrink
+// exceeds 2×. A single drawImage beyond 2× undersamples (bilinear reads only
+// a 2×2 tap), which renders the thin treated strokes with target-dependent
+// raggedness — the preview and the PNG export would each alias differently.
+function blitSteppedDown(
+  src: HTMLCanvasElement,
+  sw: number,
+  sh: number,
+  dctx: CanvasRenderingContext2D,
+  dw: number,
+  dh: number,
+) {
+  let cur: HTMLCanvasElement = src;
+  let cw = sw;
+  let ch = sh;
+  let flip = true;
+  while (cw > dw * 2 || ch > dh * 2) {
+    // floor, not round: round(1/2)=1 would stop cw shrinking and spin forever.
+    const nw = Math.max(dw, 1, Math.floor(cw / 2));
+    const nh = Math.max(dh, 1, Math.floor(ch / 2));
+    if (nw === cw && nh === ch) break;
+    const buf = flip ? (stepA ??= document.createElement("canvas")) : (stepB ??= document.createElement("canvas"));
+    flip = !flip;
+    if (buf.width !== nw || buf.height !== nh) {
+      buf.width = nw;
+      buf.height = nh;
+    }
+    const bctx = buf.getContext("2d")!;
+    bctx.imageSmoothingEnabled = true;
+    bctx.imageSmoothingQuality = "high";
+    bctx.clearRect(0, 0, nw, nh);
+    bctx.drawImage(cur, 0, 0, cw, ch, 0, 0, nw, nh);
+    cur = buf;
+    cw = nw;
+    ch = nh;
+  }
+  dctx.imageSmoothingEnabled = true;
+  dctx.imageSmoothingQuality = "high";
+  dctx.drawImage(cur, 0, 0, cw, ch, 0, 0, dw, dh);
+}
 
 const inkCache = new Map<string, [number, number, number]>();
 function parseInk(ink: string): [number, number, number] {
@@ -1335,14 +1379,11 @@ export function drawRoots(
   // the SAME treated ink.
   const treated = runStampPipeline(w, h, result, ink, progress, brush, stamp);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(
+  blitSteppedDown(
     treated.canvas,
-    0,
-    0,
     treated.pw,
     treated.ph,
-    0,
-    0,
+    ctx,
     ctx.canvas.width,
     ctx.canvas.height,
   );
