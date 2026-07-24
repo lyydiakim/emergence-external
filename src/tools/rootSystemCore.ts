@@ -1224,7 +1224,7 @@ const CUTOUT_SMOOTH_CUT = 0.5;
 // the treatment once at a reference scale and stretching the result is what
 // makes preview, PNG, MP4, and the traced SVG all show the SAME ink — same
 // weights, same breaks.
-const TREATMENT_DPR = 2;
+const TREATMENT_DPR = 4;
 
 /** The blur+threshold steps for a given treatment, radii in preview px. */
 function stampSteps(stamp: StampOpts): { blur: number; cut: number }[] {
